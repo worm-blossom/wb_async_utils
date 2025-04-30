@@ -56,6 +56,16 @@ impl<Q: Queue, F, E> State<Q, F, E> {
         }
     }
 
+    /// Returns the number of items that are currently buffered.
+    pub fn len(&self) -> usize {
+        self.len.get()
+    }
+
+    /// Returns whether there are currently no items buffered.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Same as calling [`Consumer::close`] on the Sender, but directly from an immutable reference to the state. This is essentially an escape hatch around the *single producer* part for closing. Ideally, you should not need to use this.
     /// The same invariants as for the regular `close` and `clos_sync` methods on the [`Sender`] apply.
     pub fn close(&self, fin: F) {
