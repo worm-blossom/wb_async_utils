@@ -1,6 +1,6 @@
 [package]
 name = "wb_async_utils"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "A crate of utilities for working with async code"
@@ -21,4 +21,7 @@ pollster = "0.4.0"
 smol = "2.0.2"
 futures = { version = "0.3.31" }
 
-
+# docs.rs-specific configuration
+[package.metadata.docs.rs]
+# document all features
+all-features = true
