@@ -101,29 +101,6 @@ impl<Q: Queue, F, E> State<Q, F, E> {
 
 /// Creates a new SPSC channel in the form of a [`Sender`] and a [`Receiver`] endpoint which communicate via the given [`State`].
 ///
-/// An example with a stack-allocated [`State`]:
-///
-/// ```
-/// use wb_async_utils::spsc::*;
-/// use ufotofu::*;
-///
-/// let state: State<_, _, ()> = State::new(ufotofu_queues::Fixed::new(99 /* capacity */));
-/// let (mut sender, mut receiver) = new_spsc(&state);
-///        
-/// pollster::block_on(async {
-///     // If the capacity was less than four, you would need to join
-///     // a future that sends and a future that receives the items.
-///     assert!(sender.consume(300).await.is_ok());
-///     assert!(sender.consume(400).await.is_ok());
-///     assert!(sender.consume(500).await.is_ok());
-///     assert!(sender.close(-17).await.is_ok());
-///     assert_eq!(300, receiver.produce().await.unwrap().unwrap_left());
-///     assert_eq!(400, receiver.produce().await.unwrap().unwrap_left());
-///     assert_eq!(500, receiver.produce().await.unwrap().unwrap_left());
-///     assert_eq!(-17, receiver.produce().await.unwrap().unwrap_right());
-/// });
-/// ```
-///
 /// An example with a heap-allocated [`State`]:
 ///
 /// ```
@@ -276,8 +253,7 @@ impl<R: Deref<Target = State<Q, F, E>>, Q: Queue, F, E> BulkConsumer for Sender<
                 // No empty slot available.
                 None => {
                     // Wait for queue space.
-                    let () = self.state.notify_the_sender.take().await;
-                    // Go into the next iteration of the loop, where there will be slots available.
+                    // But we do the waiting outside this `match` block, so that the mutex is released first.
                 }
                 //Got some empty slots.
                 Some(slots) => {
@@ -293,6 +269,10 @@ impl<R: Deref<Target = State<Q, F, E>>, Q: Queue, F, E> BulkConsumer for Sender<
                     return Ok(slots);
                 }
             }
+
+            // Wait for queue space.
+            let () = self.state.notify_the_sender.take().await;
+            // Go into the next iteration of the loop, where there will be slots available.
         }
     }
 
@@ -363,12 +343,15 @@ impl<R: Deref<Target = State<Q, F, E>>, Q: Queue, F, E> Producer for Receiver<R,
                         }
                         None => {
                             // No last item yet, so we wait until something changes.
-                            let () = self.state.notify_the_receiver.take().await;
-                            // Go into the next iteration of the loop, where progress will be made.
+                            // But we do the waiting outside this `match` block, so that the mutex is released first.
                         }
                     }
                 }
             }
+
+            // No last item yet, so we wait until something changes.
+            let () = self.state.notify_the_receiver.take().await;
+            // Go into the next iteration of the loop, where progress will be made.
         }
     }
 }
@@ -377,7 +360,6 @@ impl<R: Deref<Target = State<Q, F, E>>, Q: Queue, F, E> BufferedProducer for Rec
     async fn slurp(&mut self) -> Result<(), Self::Error> {
         // Nothing to do really, except that if the buffer is empty and an error was set, then we emit it.
         if self.is_empty() {
-            // if self.state.queue.read().await.len() == 0 {
             match unsafe { self.state.last.borrow_mut().take() } {
                 None => { /* no-op */ }
                 Some(Err(err)) => return Err(err),
@@ -414,8 +396,7 @@ impl<R: Deref<Target = State<Q, F, E>>, Q: Queue, F, E> BulkProducer for Receive
                         }
                         None => {
                             // No last item yet, so we wait until something changes.
-                            let () = self.state.notify_the_receiver.take().await;
-                            // Go into the next iteration of the loop, where progress will be made.
+                            // But we do the waiting outside this `match` block, so that the mutex is released first.
                         }
                     }
                 }
@@ -433,6 +414,10 @@ impl<R: Deref<Target = State<Q, F, E>>, Q: Queue, F, E> BulkProducer for Receive
                     return Ok(Left(items));
                 }
             }
+
+            // No last item yet, so we wait until something changes.
+            let () = self.state.notify_the_receiver.take().await;
+            // Go into the next iteration of the loop, where progress will be made.
         }
     }
 
@@ -549,6 +534,30 @@ mod tests {
             };
 
             join!(send_things, receive_things);
+        });
+    }
+
+    #[test]
+    fn test_spsc_receive_then_send_concurrently() {
+        pollster::block_on(async {
+            let state: State<Fixed<u64>, i16, i16> = State::new(Fixed::new(3 /* capacity */));
+            let (mut sender, mut receiver) = new_spsc(&state);
+
+            let send_things = async {
+                assert!(sender.consume(300).await.is_ok());
+                assert!(sender.consume(400).await.is_ok());
+                assert!(sender.consume(500).await.is_ok());
+                assert!(sender.close(-17).await.is_ok());
+            };
+
+            let receive_things = async {
+                assert_eq!(300, receiver.produce().await.unwrap().unwrap_left());
+                assert_eq!(400, receiver.produce().await.unwrap().unwrap_left());
+                assert_eq!(500, receiver.produce().await.unwrap().unwrap_left());
+                assert_eq!(-17, receiver.produce().await.unwrap().unwrap_right());
+            };
+
+            join!(receive_things, send_things);
         });
     }
 }
