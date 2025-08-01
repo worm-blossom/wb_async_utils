@@ -92,17 +92,11 @@ struct MutexState<C, ConsumerErr> {
 /// block_on(futures::future::join(write_some_items1, write_some_items2));
 /// ```
 #[derive(Debug)]
-pub struct SharedConsumer<C, ConsumerErr>
-where
-    C: Consumer,
-{
+pub struct SharedConsumer<C, ConsumerErr> {
     state_ref: Rc<State<C, ConsumerErr>>,
 }
 
-impl<C, ConsumerErr> Clone for SharedConsumer<C, ConsumerErr>
-where
-    C: Consumer,
-{
+impl<C, ConsumerErr> Clone for SharedConsumer<C, ConsumerErr> {
     fn clone(&self) -> Self {
         self.state_ref
             .deref()
@@ -115,10 +109,7 @@ where
     }
 }
 
-impl<C, ConsumerErr> SharedConsumer<C, ConsumerErr>
-where
-    C: Consumer,
-{
+impl<C, ConsumerErr> SharedConsumer<C, ConsumerErr> {
     /// Creates a new `SharedConsumer` from a cloneable reference to a [`State`].
     pub fn new(c: C) -> Self {
         Self {
