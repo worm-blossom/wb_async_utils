@@ -6,11 +6,11 @@ license = "MIT OR Apache-2.0"
 description = "A crate of utilities for working with async code"
 
 [features]
-# enables inmemory channel functionality
+# enables ufotofu-related functionality
 ufotofu_utils = ["ufotofu", "ufotofu_queues", "either"]
 
 [dependencies]
-ufotofu = { version = "0.6.1", features = ["std", "dev"], optional = true }
+ufotofu = { version = "0.7.0", features = ["std", "dev"], optional = true }
 # ufotofu = { path = "../../ufotofu/ufotofu", features = ["std", "dev"], optional = true }
 ufotofu_queues = { version = "0.6.0", features = ["std"], optional = true }
 either = { version = "1.10.0", optional = true }
