@@ -1,10 +1,6 @@
 //! Provides [`SharedConsumer`], a way for creating multiple independent handles that coordinate termporary exclusive access to a shared underlying consumer.
 
-use core::{
-    cell::Cell,
-    fmt::Debug,
-    ops::{Deref, DerefMut},
-};
+use core::{cell::Cell, fmt::Debug, ops::DerefMut};
 use std::rc::Rc;
 
 use ufotofu::{BufferedConsumer, BulkConsumer, Consumer};
@@ -93,18 +89,17 @@ struct MutexState<C, ConsumerErr> {
 /// ```
 #[derive(Debug)]
 pub struct SharedConsumer<C, ConsumerErr> {
-    state_ref: Rc<State<C, ConsumerErr>>,
+    state: Rc<State<C, ConsumerErr>>,
 }
 
 impl<C, ConsumerErr> Clone for SharedConsumer<C, ConsumerErr> {
     fn clone(&self) -> Self {
-        self.state_ref
-            .deref()
+        self.state
             .unclosed_handle_count
-            .set(self.state_ref.deref().unclosed_handle_count.get() + 1);
+            .set(self.state.unclosed_handle_count.get() + 1);
 
         Self {
-            state_ref: self.state_ref.clone(),
+            state: self.state.clone(),
         }
     }
 }
@@ -113,15 +108,15 @@ impl<C, ConsumerErr> SharedConsumer<C, ConsumerErr> {
     /// Creates a new `SharedConsumer` from a cloneable reference to a [`State`].
     pub fn new(c: C) -> Self {
         Self {
-            state_ref: Rc::new(State::new(c)),
+            state: Rc::new(State::new(c)),
         }
     }
 
     /// Obtains exclusive access to the underlying consumer, waiting if necessary.
     pub async fn access_consumer(&self) -> SharedConsumerAccess<C, ConsumerErr> {
         SharedConsumerAccess {
-            c: self.state_ref.deref().m.write().await,
-            unclosed_handle_count: &self.state_ref.deref().unclosed_handle_count,
+            c: self.state.m.write().await,
+            unclosed_handle_count: &self.state.unclosed_handle_count,
         }
     }
 }

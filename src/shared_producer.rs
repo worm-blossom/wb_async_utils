@@ -1,10 +1,6 @@
 //! Provides [`SharedProducer`], a way for creating multiple independent handles that coordinate termporary exclusive access to a shared underlying producer.
 
-use std::{
-    fmt::Debug,
-    ops::{Deref, DerefMut},
-    rc::Rc,
-};
+use std::{fmt::Debug, ops::DerefMut, rc::Rc};
 
 use either::Either::{self, *};
 
@@ -84,20 +80,20 @@ struct MutexState<P, ProducerFinal, ProducerErr> {
 /// ```
 #[derive(Debug, Clone)]
 pub struct SharedProducer<P, ProducerFinal, ProducerErr> {
-    state_ref: Rc<State<P, ProducerFinal, ProducerErr>>,
+    state: Rc<State<P, ProducerFinal, ProducerErr>>,
 }
 
 impl<P, ProducerFinal, ProducerErr> SharedProducer<P, ProducerFinal, ProducerErr> {
     /// Creates a new `SharedProducer` from a cloneable reference to a [`State`].
     pub fn new(producer: P) -> Self {
         Self {
-            state_ref: Rc::new(State::new(producer)),
+            state: Rc::new(State::new(producer)),
         }
     }
 
     /// Obtains exclusive access to the underlying producer, waiting if necessary.
     pub async fn access_producer(&self) -> SharedProducerAccess<P, ProducerFinal, ProducerErr> {
-        SharedProducerAccess(self.state_ref.deref().0.write().await)
+        SharedProducerAccess(self.state.0.write().await)
     }
 }
 
