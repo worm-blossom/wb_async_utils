@@ -1,20 +1,20 @@
 //! This module provides an abstraction for two communicating endpoints: a synchronous `Sender` sends data to an async `Receiver`. When the `Sender` is instructed to send even though the `Receiver` has not yet accepted the previously sent item, that item is simply overwritten and lost forever. The `Sender` can further indicate that it will not send any more data in the future (this maps to the `Producer` implementation of the `Receiver` emitting a `Final` item).
 
 use either::Either::{self, *};
-use std::{convert::Infallible, marker::PhantomData, rc::Rc};
+use std::{convert::Infallible, marker::PhantomData, ops::Deref};
 use ufotofu::Producer;
 
 use crate::TakeCell;
 
-/// The state shared between the [`Sender`] and the [`Receiver`].
+/// The state shared between the [`Sender`] and the [`Receiver`]. This is fully opaque, but we expose it to give control over where it is allocated.
 #[derive(Debug, Default)]
-struct State<Item, Final> {
+pub struct State<Item, Final> {
     cell: TakeCell<Either<Item, Final>>,
 }
 
 impl<Item, Final> State<Item, Final> {
     /// Creates a new [`State`]. Nothing more to say, state is fully opaque.
-    fn new() -> Self {
+    pub fn new() -> Self {
         State {
             cell: TakeCell::new(),
         }
@@ -32,7 +32,8 @@ impl<Item, Final> State<Item, Final> {
 /// use smol::{block_on, Timer};
 ///
 /// block_on(async {
-///     let (mut sender, mut receiver) = new_shelf();
+///     let state = State::new();
+///     let (mut sender, mut receiver) = new_shelf(&state);
 ///
 ///     let send_things = async {
 ///         sender.set(0);
@@ -52,15 +53,17 @@ impl<Item, Final> State<Item, Final> {
 ///     futures::join!(send_things, receive_things);
 /// });
 /// ```
-pub fn new_shelf<Item, Final>() -> (Sender<Item, Final>, Receiver<Item, Final>) {
-    let state = Rc::new(State::new());
+pub fn new_shelf<R, Item, Final>(state_ref: R) -> (Sender<R, Item, Final>, Receiver<R, Item, Final>)
+where
+    R: Deref<Target = State<Item, Final>> + Clone,
+{
     (
         Sender {
-            state: state.clone(),
+            state: state_ref.clone(),
             phantom: PhantomData,
         },
         Receiver {
-            state: state,
+            state: state_ref,
             phantom: PhantomData,
         },
     )
@@ -68,45 +71,45 @@ pub fn new_shelf<Item, Final>() -> (Sender<Item, Final>, Receiver<Item, Final>) 
 
 /// Allows sending data to the corresponding [`Receiver`], and to indicate that no more data will follow.
 #[derive(Debug)]
-pub struct Sender<Item, Final> {
-    state: Rc<State<Item, Final>>,
+pub struct Sender<R, Item, Final> {
+    state: R,
     phantom: PhantomData<(Item, Final)>,
 }
 
-impl<Item, Final> Sender<Item, Final> {
+impl<R: Deref<Target = State<Item, Final>>, Item, Final> Sender<R, Item, Final> {
     /// Sets the shelf to a new value. There (deliberately) is no way to detect whether the previous value had been received by the corresponding `Receiver` or not.
     ///
     /// Must not call this after having called `close`.
     pub fn set(&self, item: Item) {
-        self.state.cell.set(Left(item))
+        self.state.deref().cell.set(Left(item))
     }
 
     /// Indicates to the corresponding [`Sender`] that no more items will be set. Must not be called multiple times.
     pub fn close(&mut self, fin: Final) {
-        self.state.cell.set(Right(fin))
+        self.state.deref().cell.set(Right(fin))
     }
 
     /// Updates the shelf's current value (if any) with a synchronous function.
     pub fn update(&self, with: impl FnOnce(Option<Either<Item, Final>>) -> Either<Item, Final>) {
-        self.state.cell.update(with)
+        self.state.deref().cell.update(with)
     }
 }
 
 /// Allows receiving data from the corresponding [`Sender`] via a [`Producer`] implementation.
 #[derive(Debug)]
-pub struct Receiver<Item, Final> {
-    state: Rc<State<Item, Final>>,
+pub struct Receiver<R, Item, Final> {
+    state: R,
     phantom: PhantomData<(Item, Final)>,
 }
 
-impl<Item, Final> Receiver<Item, Final> {
+impl<R: Deref<Target = State<Item, Final>>, Item, Final> Receiver<R, Item, Final> {
     /// Returns whether there is currently no value set.
     pub fn is_empty(&self) -> bool {
-        self.state.cell.is_empty()
+        self.state.deref().cell.is_empty()
     }
 }
 
-impl<Item, Final> Producer for Receiver<Item, Final> {
+impl<R: Deref<Target = State<Item, Final>>, Item, Final> Producer for Receiver<R, Item, Final> {
     type Item = Item;
 
     type Final = Final;
@@ -116,6 +119,6 @@ impl<Item, Final> Producer for Receiver<Item, Final> {
     /// Take an item from the buffer queue, waiting for an item to
     /// become available (by being consumed by the corresponding [`Sender`]) if necessary.
     async fn produce(&mut self) -> Result<Either<Self::Item, Self::Final>, Self::Error> {
-        Ok(self.state.cell.take().await)
+        Ok(self.state.deref().cell.take().await)
     }
 }

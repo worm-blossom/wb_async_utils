@@ -1,22 +1,25 @@
 //! Provides [`SharedConsumer`], a way for creating multiple independent handles that coordinate termporary exclusive access to a shared underlying consumer.
 
-use core::{cell::Cell, fmt::Debug, ops::DerefMut};
-use std::rc::Rc;
+use core::{
+    cell::Cell,
+    fmt::Debug,
+    ops::{Deref, DerefMut},
+};
 
 use ufotofu::{BufferedConsumer, BulkConsumer, Consumer};
 
 use crate::{mutex::WriteGuard, Mutex};
 
-/// The state shared between all clones of the same [`SharedConsumer`].
+/// The state shared between all clones of the same [`SharedConsumer`]. This is fully opaque, but we expose it to give control over where it is allocated.
 #[derive(Debug)]
-struct State<C, ConsumerErr> {
+pub struct State<C, ConsumerErr> {
     m: Mutex<MutexState<C, ConsumerErr>>,
     unclosed_handle_count: Cell<usize>,
 }
 
 impl<C, ConsumerErr> State<C, ConsumerErr> {
     /// Creates a new [`State`] for managing shared access to the same `consumer`.
-    fn new(consumer: C) -> Self {
+    pub fn new(consumer: C) -> Self {
         State {
             m: Mutex::new(MutexState {
                 c: consumer,
@@ -43,6 +46,8 @@ struct MutexState<C, ConsumerErr> {
 ///
 /// The `Error` type of the inner consumer must implement [`Clone`]. Once the inner consumer emits an error, all [`SharedConsumerAccess`] handles will emit clones of that value on all operations. The implementation ensures that the inner consumer is not used after an error.
 ///
+/// The shared state between all clones of the same [`SharedConsumer`] must be supplied via a reference of type `R` to an [opaque handle](State) at creation time; this gives control over how to allocate the state and manage its lifetime to the user. Typical choices for `R` would be an `Rc<shared_producer::State>` or a `&shared_producer::State`.
+///
 /// ```
 /// use core::time::Duration;
 /// use either::Either::*;
@@ -51,8 +56,9 @@ struct MutexState<C, ConsumerErr> {
 /// use ufotofu::{Consumer, consumer::{TestConsumer, TestConsumerBuilder}};
 ///
 /// let underlying_c: TestConsumer<u8, (), i16> = TestConsumerBuilder::new(-4, 3).build();
+/// let state = State::new(underlying_c);
 ///
-/// let shared1 = SharedConsumer::new(underlying_c);
+/// let shared1 = SharedConsumer::new(&state);
 /// let shared2 = shared1.clone();
 ///
 /// let write_some_items1 = async {
@@ -88,35 +94,43 @@ struct MutexState<C, ConsumerErr> {
 /// block_on(futures::future::join(write_some_items1, write_some_items2));
 /// ```
 #[derive(Debug)]
-pub struct SharedConsumer<C, ConsumerErr> {
-    state: Rc<State<C, ConsumerErr>>,
+pub struct SharedConsumer<R, C, ConsumerErr>
+where
+    R: Deref<Target = State<C, ConsumerErr>> + Clone,
+{
+    state_ref: R,
 }
 
-impl<C, ConsumerErr> Clone for SharedConsumer<C, ConsumerErr> {
+impl<R, C, ConsumerErr> Clone for SharedConsumer<R, C, ConsumerErr>
+where
+    R: Deref<Target = State<C, ConsumerErr>> + Clone,
+{
     fn clone(&self) -> Self {
-        self.state
+        self.state_ref
+            .deref()
             .unclosed_handle_count
-            .set(self.state.unclosed_handle_count.get() + 1);
+            .set(self.state_ref.deref().unclosed_handle_count.get() + 1);
 
         Self {
-            state: self.state.clone(),
+            state_ref: self.state_ref.clone(),
         }
     }
 }
 
-impl<C, ConsumerErr> SharedConsumer<C, ConsumerErr> {
+impl<R, C, ConsumerErr> SharedConsumer<R, C, ConsumerErr>
+where
+    R: Deref<Target = State<C, ConsumerErr>> + Clone,
+{
     /// Creates a new `SharedConsumer` from a cloneable reference to a [`State`].
-    pub fn new(c: C) -> Self {
-        Self {
-            state: Rc::new(State::new(c)),
-        }
+    pub fn new(state_ref: R) -> Self {
+        Self { state_ref }
     }
 
     /// Obtains exclusive access to the underlying consumer, waiting if necessary.
     pub async fn access_consumer(&self) -> SharedConsumerAccess<C, ConsumerErr> {
         SharedConsumerAccess {
-            c: self.state.m.write().await,
-            unclosed_handle_count: &self.state.unclosed_handle_count,
+            c: self.state_ref.deref().m.write().await,
+            unclosed_handle_count: &self.state_ref.deref().unclosed_handle_count,
         }
     }
 }
@@ -261,8 +275,9 @@ mod tests {
     #[test]
     fn test_shared_consumer_errors() {
         let underlying_c: TestConsumer<u8, (), i16> = TestConsumerBuilder::new(-4, 3).build();
+        let state = State::new(underlying_c);
 
-        let shared1 = SharedConsumer::new(underlying_c);
+        let shared1 = SharedConsumer::new(&state);
         let shared2 = shared1.clone();
 
         let write_some_items1 = async {
@@ -304,7 +319,8 @@ mod tests {
             spsc::State::new(Fixed::new(16 /* capacity */));
         let (sender, mut receiver) = new_spsc(&spsc_state);
 
-        let shared1 = SharedConsumer::new(sender);
+        let state = State::new(sender);
+        let shared1 = SharedConsumer::new(&state);
         let shared2 = shared1.clone();
 
         let write_some_items1 = async {
