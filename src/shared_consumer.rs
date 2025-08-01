@@ -11,12 +11,13 @@ use ufotofu::{BufferedConsumer, BulkConsumer, Consumer};
 use crate::{mutex::WriteGuard, Mutex};
 
 /// The state shared between all clones of the same [`SharedConsumer`]. This is fully opaque, but we expose it to give control over where it is allocated.
-pub struct State<C: Consumer> {
-    m: Mutex<MutexState<C>>,
+#[derive(Debug)]
+pub struct State<C, ConsumerErr> {
+    m: Mutex<MutexState<C, ConsumerErr>>,
     unclosed_handle_count: Cell<usize>,
 }
 
-impl<C: Consumer> State<C> {
+impl<C, ConsumerErr> State<C, ConsumerErr> {
     /// Creates a new [`State`] for managing shared access to the same `consumer`.
     pub fn new(consumer: C) -> Self {
         State {
@@ -29,23 +30,10 @@ impl<C: Consumer> State<C> {
     }
 }
 
-impl<C> Debug for State<C>
-where
-    C: Consumer + Debug,
-    C::Error: Debug,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("State")
-            .field("m", &self.m)
-            .field("unclosed_handle_count", &self.unclosed_handle_count)
-            .finish()
-    }
-}
-
 #[derive(Debug)]
-struct MutexState<C: Consumer> {
+struct MutexState<C, ConsumerErr> {
     c: C,
-    error: Option<C::Error>,
+    error: Option<ConsumerErr>,
 }
 
 /// A consumer adaptor that allows access to the same consumer from multiple parts in the codebase by providing a cloneable handle.
@@ -106,18 +94,16 @@ struct MutexState<C: Consumer> {
 /// block_on(futures::future::join(write_some_items1, write_some_items2));
 /// ```
 #[derive(Debug)]
-pub struct SharedConsumer<R, C>
+pub struct SharedConsumer<R, C, ConsumerErr>
 where
-    C: Consumer,
-    R: Deref<Target = State<C>> + Clone,
+    R: Deref<Target = State<C, ConsumerErr>> + Clone,
 {
     state_ref: R,
 }
 
-impl<R, C> Clone for SharedConsumer<R, C>
+impl<R, C, ConsumerErr> Clone for SharedConsumer<R, C, ConsumerErr>
 where
-    C: Consumer,
-    R: Deref<Target = State<C>> + Clone,
+    R: Deref<Target = State<C, ConsumerErr>> + Clone,
 {
     fn clone(&self) -> Self {
         self.state_ref
@@ -131,10 +117,9 @@ where
     }
 }
 
-impl<R, C> SharedConsumer<R, C>
+impl<R, C, ConsumerErr> SharedConsumer<R, C, ConsumerErr>
 where
-    C: Consumer,
-    R: Deref<Target = State<C>> + Clone,
+    R: Deref<Target = State<C, ConsumerErr>> + Clone,
 {
     /// Creates a new `SharedConsumer` from a cloneable reference to a [`State`].
     pub fn new(state_ref: R) -> Self {
@@ -142,7 +127,7 @@ where
     }
 
     /// Obtains exclusive access to the underlying consumer, waiting if necessary.
-    pub async fn access_consumer(&self) -> SharedConsumerAccess<C> {
+    pub async fn access_consumer(&self) -> SharedConsumerAccess<C, ConsumerErr> {
         SharedConsumerAccess {
             c: self.state_ref.deref().m.write().await,
             unclosed_handle_count: &self.state_ref.deref().unclosed_handle_count,
@@ -151,29 +136,17 @@ where
 }
 
 /// A handle that represents exclusive access to an underlying shared consumer. Implements the consumer traits and forwards method calls to the underlying consumer. After the underlying consumer has emitted its error, a [`SharedConsumerAccess`] replays copies of that error instead of continuing to call methods on the underlying consumer.
-pub struct SharedConsumerAccess<'shared_consumer, C: Consumer> {
-    c: WriteGuard<'shared_consumer, MutexState<C>>,
+#[derive(Debug)]
+pub struct SharedConsumerAccess<'shared_consumer, C, ConsumerErr> {
+    c: WriteGuard<'shared_consumer, MutexState<C, ConsumerErr>>,
     unclosed_handle_count: &'shared_consumer Cell<usize>,
 }
 
-impl<C> Debug for SharedConsumerAccess<'_, C>
+impl<C, ConsumerErr> Consumer for SharedConsumerAccess<'_, C, ConsumerErr>
 where
-    C: Consumer + Debug,
-    C::Error: Debug,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SharedConsumerAccess")
-            .field("c", &self.c)
-            .field("unclosed_handle_count", &self.unclosed_handle_count)
-            .finish()
-    }
-}
-
-impl<C> Consumer for SharedConsumerAccess<'_, C>
-where
-    C: Consumer,
+    C: Consumer<Error = ConsumerErr>,
     C::Final: Clone,
-    C::Error: Clone,
+    ConsumerErr: Clone,
 {
     type Item = C::Item;
 
@@ -223,11 +196,11 @@ where
     }
 }
 
-impl<C> BufferedConsumer for SharedConsumerAccess<'_, C>
+impl<C, ConsumerErr> BufferedConsumer for SharedConsumerAccess<'_, C, ConsumerErr>
 where
-    C: BufferedConsumer,
+    C: BufferedConsumer<Error = ConsumerErr>,
     C::Final: Clone,
-    C::Error: Clone,
+    ConsumerErr: Clone,
 {
     async fn flush(&mut self) -> Result<(), Self::Error> {
         let inner_state = self.c.deref_mut();
@@ -245,11 +218,11 @@ where
     }
 }
 
-impl<C> BulkConsumer for SharedConsumerAccess<'_, C>
+impl<C, ConsumerErr> BulkConsumer for SharedConsumerAccess<'_, C, ConsumerErr>
 where
-    C: BulkConsumer,
+    C: BulkConsumer<Error = ConsumerErr>,
     C::Final: Clone,
-    C::Error: Clone,
+    ConsumerErr: Clone,
 {
     async fn expose_slots<'a>(&'a mut self) -> Result<&'a mut [Self::Item], Self::Error>
     where

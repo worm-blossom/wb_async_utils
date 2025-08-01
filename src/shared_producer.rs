@@ -12,9 +12,10 @@ use ufotofu::{BufferedProducer, BulkProducer, Producer};
 use crate::{mutex::WriteGuard, Mutex};
 
 /// The state shared between all clones of the same [`SharedProducer`]. This is fully opaque, but we expose it to give control over where it is allocated.
-pub struct State<P: Producer>(Mutex<MutexState<P>>);
+#[derive(Debug)]
+pub struct State<P, ProducerFinal, ProducerErr>(Mutex<MutexState<P, ProducerFinal, ProducerErr>>);
 
-impl<P: Producer> State<P> {
+impl<P, ProducerFinal, ProducerErr> State<P, ProducerFinal, ProducerErr> {
     /// Creates a new [`State`] for managing shared access to the same `producer`.
     pub fn new(producer: P) -> Self {
         State(Mutex::new(MutexState {
@@ -24,21 +25,10 @@ impl<P: Producer> State<P> {
     }
 }
 
-impl<P> Debug for State<P>
-where
-    P: Producer + Debug,
-    P::Final: Debug,
-    P::Error: Debug,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("State").field(&self.0).finish()
-    }
-}
-
 #[derive(Debug)]
-struct MutexState<P: Producer> {
+struct MutexState<P, ProducerFinal, ProducerErr> {
     p: P,
-    last: Option<Result<P::Final, P::Error>>,
+    last: Option<Result<ProducerFinal, ProducerErr>>,
 }
 
 /// A producer adaptor that allows access to the same producer from multiple parts in the codebase by providing a cloneable handle.
@@ -95,18 +85,16 @@ struct MutexState<P: Producer> {
 /// smol::block_on(futures::future::join(read_some_items1, read_some_items2));
 /// ```
 #[derive(Debug, Clone)]
-pub struct SharedProducer<R, P>
+pub struct SharedProducer<R, P, ProducerFinal, ProducerErr>
 where
-    P: Producer,
-    R: Deref<Target = State<P>> + Clone,
+    R: Deref<Target = State<P, ProducerFinal, ProducerErr>> + Clone,
 {
     state_ref: R,
 }
 
-impl<R, P> SharedProducer<R, P>
+impl<R, P, ProducerFinal, ProducerErr> SharedProducer<R, P, ProducerFinal, ProducerErr>
 where
-    P: Producer,
-    R: Deref<Target = State<P>> + Clone,
+    R: Deref<Target = State<P, ProducerFinal, ProducerErr>> + Clone,
 {
     /// Creates a new `SharedProducer` from a cloneable reference to a [`State`].
     pub fn new(state_ref: R) -> Self {
@@ -114,34 +102,23 @@ where
     }
 
     /// Obtains exclusive access to the underlying producer, waiting if necessary.
-    pub async fn access_producer(&self) -> SharedProducerAccess<P> {
+    pub async fn access_producer(&self) -> SharedProducerAccess<P, ProducerFinal, ProducerErr> {
         SharedProducerAccess(self.state_ref.deref().0.write().await)
     }
 }
 
 /// A handle that represents exclusive access to an underlying shared producer. Implements the producer traits and forwards method calls to the underlying producer. After the underlying producer has emitted its final item or an error, a [`SharedProducerAccess`] replays copies of that last value instead of continuing to call methods on the underlying producer.
-pub struct SharedProducerAccess<'shared_producer, P: Producer>(
-    WriteGuard<'shared_producer, MutexState<P>>,
+#[derive(Debug)]
+pub struct SharedProducerAccess<'shared_producer, P, ProducerFinal, ProducerErr>(
+    WriteGuard<'shared_producer, MutexState<P, ProducerFinal, ProducerErr>>,
 );
 
-impl<P> Debug for SharedProducerAccess<'_, P>
+impl<P, ProducerFinal, ProducerErr> Producer
+    for SharedProducerAccess<'_, P, ProducerFinal, ProducerErr>
 where
-    P: Producer + Debug,
-    P::Final: Debug,
-    P::Error: Debug,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("SharedProducerAccess")
-            .field(&self.0)
-            .finish()
-    }
-}
-
-impl<P> Producer for SharedProducerAccess<'_, P>
-where
-    P: Producer,
-    P::Final: Clone,
-    P::Error: Clone,
+    P: Producer<Final = ProducerFinal, Error = ProducerErr>,
+    ProducerFinal: Clone,
+    ProducerErr: Clone,
 {
     type Item = P::Item;
 
@@ -170,11 +147,12 @@ where
     }
 }
 
-impl<P> BufferedProducer for SharedProducerAccess<'_, P>
+impl<P, ProducerFinal, ProducerErr> BufferedProducer
+    for SharedProducerAccess<'_, P, ProducerFinal, ProducerErr>
 where
-    P: BufferedProducer,
-    P::Final: Clone,
-    P::Error: Clone,
+    P: BufferedProducer<Final = ProducerFinal, Error = ProducerErr>,
+    ProducerFinal: Clone,
+    ProducerErr: Clone,
 {
     async fn slurp(&mut self) -> Result<(), Self::Error> {
         let inner_state = self.0.deref_mut();
@@ -193,11 +171,12 @@ where
     }
 }
 
-impl<P> BulkProducer for SharedProducerAccess<'_, P>
+impl<P, ProducerFinal, ProducerErr> BulkProducer
+    for SharedProducerAccess<'_, P, ProducerFinal, ProducerErr>
 where
-    P: BulkProducer,
-    P::Final: Clone,
-    P::Error: Clone,
+    P: BulkProducer<Final = ProducerFinal, Error = ProducerErr>,
+    ProducerFinal: Clone,
+    ProducerErr: Clone,
 {
     async fn expose_items<'a>(
         &'a mut self,
