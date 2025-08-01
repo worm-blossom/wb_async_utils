@@ -3,6 +3,7 @@
 use std::{
     fmt::Debug,
     ops::{Deref, DerefMut},
+    rc::Rc,
 };
 
 use either::Either::{self, *};
@@ -11,13 +12,13 @@ use ufotofu::{BufferedProducer, BulkProducer, Producer};
 
 use crate::{mutex::WriteGuard, Mutex};
 
-/// The state shared between all clones of the same [`SharedProducer`]. This is fully opaque, but we expose it to give control over where it is allocated.
+/// The state shared between all clones of the same [`SharedProducer`].
 #[derive(Debug)]
-pub struct State<P, ProducerFinal, ProducerErr>(Mutex<MutexState<P, ProducerFinal, ProducerErr>>);
+struct State<P, ProducerFinal, ProducerErr>(Mutex<MutexState<P, ProducerFinal, ProducerErr>>);
 
 impl<P, ProducerFinal, ProducerErr> State<P, ProducerFinal, ProducerErr> {
     /// Creates a new [`State`] for managing shared access to the same `producer`.
-    pub fn new(producer: P) -> Self {
+    fn new(producer: P) -> Self {
         State(Mutex::new(MutexState {
             p: producer,
             last: None,
@@ -39,8 +40,6 @@ struct MutexState<P, ProducerFinal, ProducerErr> {
 ///
 /// The `Final` and the `Error` type of the inner producer must implement [`Clone`]. Once the inner producer emits its final value or an error, all [`SharedProducerAccess`] handles will emit clones of that value. The implementation ensures that the inner producer is not used after an error or the final item.
 ///
-/// The shared state between all clones of the same [`SharedProducer`] must be supplied via a reference of type `R` to an [opaque handle](State) at creation time; this gives control over how to allocate the state and manage its lifetime to the user. Typical choices for `R` would be an `Rc<shared_producer::State>` or a `&shared_producer::State`.
-///
 /// ```
 /// use core::time::Duration;
 /// use either::Either::*;
@@ -49,9 +48,8 @@ struct MutexState<P, ProducerFinal, ProducerErr> {
 /// use ufotofu::{Producer, producer::{TestProducer, TestProducerBuilder}};
 ///
 /// let underlying_p: TestProducer<u8, (), i16> = TestProducerBuilder::new(vec![1, 2, 3].into(), Err(-17)).build();
-/// let state = State::new(underlying_p);
 ///
-/// let shared1 = SharedProducer::new(&state);
+/// let shared1 = SharedProducer::new(underlying_p);
 /// let shared2 = shared1.clone();
 ///
 /// let read_some_items1 = async {
@@ -85,20 +83,16 @@ struct MutexState<P, ProducerFinal, ProducerErr> {
 /// smol::block_on(futures::future::join(read_some_items1, read_some_items2));
 /// ```
 #[derive(Debug, Clone)]
-pub struct SharedProducer<R, P, ProducerFinal, ProducerErr>
-where
-    R: Deref<Target = State<P, ProducerFinal, ProducerErr>> + Clone,
-{
-    state_ref: R,
+pub struct SharedProducer<P, ProducerFinal, ProducerErr> {
+    state_ref: Rc<State<P, ProducerFinal, ProducerErr>>,
 }
 
-impl<R, P, ProducerFinal, ProducerErr> SharedProducer<R, P, ProducerFinal, ProducerErr>
-where
-    R: Deref<Target = State<P, ProducerFinal, ProducerErr>> + Clone,
-{
+impl<P, ProducerFinal, ProducerErr> SharedProducer<P, ProducerFinal, ProducerErr> {
     /// Creates a new `SharedProducer` from a cloneable reference to a [`State`].
-    pub fn new(state_ref: R) -> Self {
-        Self { state_ref }
+    pub fn new(producer: P) -> Self {
+        Self {
+            state_ref: Rc::new(State::new(producer)),
+        }
     }
 
     /// Obtains exclusive access to the underlying producer, waiting if necessary.
@@ -234,9 +228,8 @@ mod tests {
     fn test_shared_producer() {
         let underlying_p: TestProducer<u8, (), i16> =
             TestProducerBuilder::new(vec![1, 2, 3].into(), Err(-17)).build();
-        let state = State::new(underlying_p);
 
-        let shared1 = SharedProducer::new(&state);
+        let shared1 = SharedProducer::new(underlying_p);
         let shared2 = shared1.clone();
 
         let read_some_items1 = async {
